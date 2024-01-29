@@ -188,7 +188,7 @@ func (ngm *nvidiaGPUManager) ListDevices() map[string]pluginapi.Device {
 			for i := 0; i < ngm.gpuConfig.GPUSharingConfig.MaxSharedClientsPerGPU; i++ {
 				virtualDeviceID := fmt.Sprintf("%s/vgpu%d", device.ID, i)
 				// When sharing GPUs, the virtual GPU device will inherit the health status from its underlying physical GPU device.
-				virtualGPUDevices[virtualDeviceID] = pluginapi.Device{ID: virtualDeviceID, Health: device.Health}
+				virtualGPUDevices[virtualDeviceID] = pluginapi.Device{ID: virtualDeviceID, Health: device.Health, Topology: device.Topology}
 			}
 		}
 		return virtualGPUDevices
@@ -229,19 +229,40 @@ func (ngm *nvidiaGPUManager) DeviceSpec(deviceID string) ([]pluginapi.DeviceSpec
 
 // Discovers all NVIDIA GPU devices available on the local node by walking nvidiaGPUManager's devDirectory.
 func (ngm *nvidiaGPUManager) discoverGPUs() error {
-	reg := regexp.MustCompile(nvidiaDeviceRE)
-	files, err := ioutil.ReadDir(ngm.devDirectory)
-	if err != nil {
-		return err
+	devicesCount, ret := nvml.DeviceGetCount()
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("failed to get the device count: %v", ret)
 	}
-	for _, f := range files {
-		if f.IsDir() {
-			continue
+
+	for i := 0; i < devicesCount; i++ {
+		device, ret := nvml.DeviceGetHandleByIndex(i)
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("failed to get the device handle for index %d: %v", i, ret)
 		}
-		if reg.MatchString(f.Name()) {
-			glog.V(3).Infof("Found Nvidia GPU %q\n", f.Name())
-			ngm.SetDeviceHealth(f.Name(), pluginapi.Healthy)
+
+		path, err := getPath(i, device)
+		if err != nil {
+			return fmt.Errorf("failed to get path for device with index %d: %v", i, err)
 		}
+
+		glog.V(3).Infof("Found Nvidia GPU %q\n", path)
+		var topologyInfo *pluginapi.TopologyInfo
+		if isMigDevice(path) {
+			parent, ret := device.GetMigDeviceHandleByIndex(i)
+			if ret != nvml.SUCCESS {
+				return fmt.Errorf("failed to get mig device handle for device with index %d: %v", i, ret)
+			}
+
+			topologyInfo, err = getTopologyInfo(i, parent)
+		} else {
+			topologyInfo, err = getTopologyInfo(i, device)
+		}
+
+		if err != nil {
+			return fmt.Errorf("failed to get topology info for device with index %d: %v", i, err)
+		}
+
+		ngm.SetDeviceHealth(path, pluginapi.Healthy, topologyInfo)
 	}
 	return nil
 }
@@ -325,16 +346,16 @@ func (ngm *nvidiaGPUManager) Envs(numDevicesRequested int) map[string]string {
 }
 
 // SetDeviceHealth sets the health status for a GPU device or partition if MIG is enabled
-func (ngm *nvidiaGPUManager) SetDeviceHealth(name string, health string) {
+func (ngm *nvidiaGPUManager) SetDeviceHealth(name string, health string, topology *pluginapi.TopologyInfo) {
 	ngm.devicesMutex.Lock()
 	defer ngm.devicesMutex.Unlock()
 
-	reg := regexp.MustCompile(nvidiaDeviceRE)
-	if reg.MatchString(name) {
-		ngm.devices[name] = pluginapi.Device{ID: name, Health: health}
-	} else {
-		ngm.migDeviceManager.SetDeviceHealth(name, health)
+	if isMigDevice(name) {
+		ngm.migDeviceManager.SetDeviceHealth(name, health, topology)
+		return
 	}
+
+	ngm.devices[name] = pluginapi.Device{ID: name, Health: health, Topology: topology}
 }
 
 // Checks if the two nvidia paths exist. Could be used to verify if the driver
@@ -405,6 +426,66 @@ func totalMemPerGPU() (uint64, error) {
 		return 0, fmt.Errorf("failed to get GPU memory: %v", nvml.ErrorString(ret))
 	}
 	return memory.Total, nil
+}
+
+func isMigDevice(path string) bool {
+	reg := regexp.MustCompile(nvidiaDeviceRE)
+	if reg.MatchString(path) {
+		return false
+	}
+	return true
+}
+
+func getPath(index int, d nvml.Device) (string, error) {
+	minor, ret := d.GetMinorNumber()
+	if ret != nvml.SUCCESS {
+		return "", fmt.Errorf("failed to get minor number for device with index %d: %v", index, ret)
+	}
+	return fmt.Sprintf("/dev/nvidia%d", minor), nil
+}
+
+func getTopologyInfo(index int, d nvml.Device) (*pluginapi.TopologyInfo, error) {
+	info, ret := d.GetPciInfo()
+
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("error getting PCI Bus Info for device with index %d: %v", index, ret)
+	}
+
+	// Discard leading zeros.
+	busID := strings.ToLower(strings.TrimPrefix(intToByteString(info.BusId), "0000"))
+
+	b, err := os.ReadFile(fmt.Sprintf("/sys/bus/pci/devices/%s/numa_node", busID))
+	if err != nil {
+		return nil, nil
+	}
+
+	node, err := strconv.Atoi(string(bytes.TrimSpace(b)))
+	if err != nil {
+		return nil, fmt.Errorf("eror parsing value for NUMA node: %v", err)
+	}
+
+	if node < 0 {
+		return nil, nil
+	}
+
+	return &pluginapi.TopologyInfo{
+		Nodes: []*pluginapi.NUMANode{
+			{
+				ID: int64(node),
+			},
+		},
+	}, nil
+}
+
+func intToByteString(s [32]int8) string {
+	var b []byte
+	for _, c := range s {
+		if c == 0 {
+			break
+		}
+		b = append(b, byte(c))
+	}
+	return string(b)
 }
 
 func (ngm *nvidiaGPUManager) Serve(pMountPath, kEndpoint, pluginEndpoint string) {
