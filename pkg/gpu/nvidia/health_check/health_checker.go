@@ -48,6 +48,8 @@ func NewGPUHealthChecker(devices map[string]pluginapi.Device, health chan plugin
 	}
 
 	// Cloning the device map to avoid interfering with the device manager
+	fmt.Println("Listing devices...")
+	fmt.Printf("%v", devices)
 	for id, d := range devices {
 		hc.devices[id] = d
 	}
@@ -63,7 +65,8 @@ func NewGPUHealthChecker(devices map[string]pluginapi.Device, health chan plugin
 // Start registers NVML events and starts listening to them
 func (hc *GPUHealthChecker) Start() error {
 	glog.Info("Starting GPU Health Checker")
-
+	fmt.Println("Heyy...")
+	fmt.Printf("%v", hc.devices)
 	for name, device := range hc.devices {
 		glog.Infof("Healthchecker receives device %s, device %v+", name, device)
 	}

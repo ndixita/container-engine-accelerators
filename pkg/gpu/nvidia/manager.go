@@ -167,6 +167,8 @@ func NewNvidiaGPUManager(devDirectory, procDirectory string, mountPaths []plugin
 
 // ListPhysicalDevices lists all physical GPU devices (including partitions) available on this node.
 func (ngm *nvidiaGPUManager) ListPhysicalDevices() map[string]pluginapi.Device {
+	fmt.Print("idhar...")
+	fmt.Printf("abey...%v", ngm.gpuConfig.GPUPartitionSize)
 	if ngm.gpuConfig.GPUPartitionSize == "" {
 		return ngm.devices
 	}
@@ -233,11 +235,11 @@ func (ngm *nvidiaGPUManager) discoverGPUs() error {
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("failed to get the device count: %v", ret)
 	}
-
+	fmt.Println("v4 change")
 	for i := 0; i < devicesCount; i++ {
 		device, ret := nvml.DeviceGetHandleByIndex(i)
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("failed to get the device handle for index %d: %v", i, ret)
+			return fmt.Errorf("failed to get the device handle for index %d: %v", i, nvml.ErrorString(ret))
 		}
 
 		path, err := getPath(i, device)
@@ -245,12 +247,17 @@ func (ngm *nvidiaGPUManager) discoverGPUs() error {
 			return fmt.Errorf("failed to get path for device with index %d: %v", i, err)
 		}
 
-		glog.V(3).Infof("Found Nvidia GPU %q\n", path)
+		fmt.Printf("Found Nvidia GPU %q\n", path)
 		var topologyInfo *pluginapi.TopologyInfo
-		if isMigDevice(path) {
+		currentMode, _, _ := device.GetMigMode()
+		// if ret != nvml.SUCCESS {
+		// 	return fmt.Errorf("unable to get MIG mode: %v", nvml.ErrorString(ret))
+		// }
+		fmt.Printf("current mode: %d \n", currentMode)
+		if currentMode == 1 {
 			parent, ret := device.GetMigDeviceHandleByIndex(i)
 			if ret != nvml.SUCCESS {
-				return fmt.Errorf("failed to get mig device handle for device with index %d: %v", i, ret)
+				return fmt.Errorf("failed to get mig device handle for device with index %d: %v", i, nvml.ErrorString(ret))
 			}
 
 			topologyInfo, err = getTopologyInfo(i, parent)
