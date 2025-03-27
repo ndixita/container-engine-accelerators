@@ -229,41 +229,45 @@ func (ngm *nvidiaGPUManager) DeviceSpec(deviceID string) ([]pluginapi.DeviceSpec
 	return ngm.migDeviceManager.DeviceSpec(deviceID)
 }
 
-// Discovers all NVIDIA GPU devices available on the local node by walking nvidiaGPUManager's devDirectory.
-func (ngm *nvidiaGPUManager) discoverGPUs() error {
-	devicesCount, ret := nvml.DeviceGetCount()
-	if ret != nvml.SUCCESS {
-		return fmt.Errorf("failed to get devices count: %v", nvml.ErrorString(ret))
-	}
+type nvmlDeviceInfo interface {
+	devicesCount() (int, nvml.Return)
+	deviceHandleByIndex(int) (nvml.Device, nvml.Return)
+	migDeviceHandle(nvml.Device, int) (nvml.Device, nvml.Return)
+	migMode(nvml.Device) (int, int, nvml.Return)
+	minorNumber(nvml.Device) (int, nvml.Return)
+	topology(nvml.Device, int) (*pluginapi.TopologyInfo, error)
+}
 
-	for i := 0; i < devicesCount; i++ {
-		device, ret := nvml.DeviceGetHandleByIndex(i)
-		if ret != nvml.SUCCESS {
-			return fmt.Errorf("failed to get the device handle for index %d: %v", i, nvml.ErrorString(ret))
-		}
+type deviceInfo struct{}
 
-		minor, ret := device.GetMinorNumber()
-		if ret != nvml.SUCCESS {
-			return fmt.Errorf("failed to get the minor number for device with index %d: %v", i, nvml.ErrorString(ret))
-		}
+var info nvmlDeviceInfo
 
-		path := fmt.Sprintf("nvidia%d", minor)
-		glog.V(3).Infof("Found Nvidia GPU %q\n", path)
-		topologyInfo, err := topology(device, i)
-		if err != nil {
-			return err
-		}
-		ngm.SetDeviceHealth(path, pluginapi.Healthy, topologyInfo)
-	}
-	return nil
+func (nv *deviceInfo) devicesCount() (int, nvml.Return) {
+	return nvml.DeviceGetCount()
+}
+
+func (nv *deviceInfo) deviceHandleByIndex(i int) (nvml.Device, nvml.Return) {
+	return nvml.DeviceGetHandleByIndex(i)
+}
+
+func (nv *deviceInfo) minorNumber(d nvml.Device) (int, nvml.Return) {
+	return d.GetMinorNumber()
+}
+
+func (nv *deviceInfo) migMode(d nvml.Device) (int, int, nvml.Return) {
+	return d.GetMigMode()
+}
+
+func (nv *deviceInfo) migDeviceHandle(d nvml.Device, i int) (nvml.Device, nvml.Return) {
+	return d.GetMigDeviceHandleByIndex(i)
 }
 
 // topology determines the NUMA topology information for a GPU device.
 // For MIG-enabled GPUs, it retrieves the NUMA node ID from the parent GPU device.
 // For non-MIG GPUs, it gets the NUMA node ID directly from the GPU device.
 // Returns a TopologyInfo containing the NUMA node ID if NUMA is enabled, nil otherwise.
-func topology(gpuDevice nvml.Device, i int) (*pluginapi.TopologyInfo, error) {
-	currentMode, _, ret := gpuDevice.GetMigMode()
+func (nv *deviceInfo) topology(gpuDevice nvml.Device, i int) (*pluginapi.TopologyInfo, error) {
+	currentMode, _, ret := info.migMode(gpuDevice)
 	if ret != nvml.ERROR_NOT_SUPPORTED {
 		if ret != nvml.SUCCESS {
 			return nil, fmt.Errorf("failed to get mig mode: %v", nvml.ErrorString(ret))
@@ -275,7 +279,7 @@ func topology(gpuDevice nvml.Device, i int) (*pluginapi.TopologyInfo, error) {
 	// directly from the GPU device itself.
 	numaDevice := gpuDevice
 	if currentMode == 1 {
-		parent, ret := gpuDevice.GetMigDeviceHandleByIndex(i)
+		parent, ret := info.migDeviceHandle(gpuDevice, i)
 		if ret != nvml.SUCCESS {
 			return nil, fmt.Errorf("failed to get mig device handle: %v", nvml.ErrorString(ret))
 		}
@@ -298,6 +302,36 @@ func topology(gpuDevice nvml.Device, i int) (*pluginapi.TopologyInfo, error) {
 			},
 		},
 	}, nil
+}
+
+// Discovers all NVIDIA GPU devices available on the local node by walking nvidiaGPUManager's devDirectory.
+func (ngm *nvidiaGPUManager) discoverGPUs() error {
+	devicesCount, ret := info.devicesCount()
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("failed to get devices count: %v", nvml.ErrorString(ret))
+	}
+
+	for i := 0; i < devicesCount; i++ {
+		device, ret := info.deviceHandleByIndex(i)
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("failed to get the device handle for index %d: %v", i, nvml.ErrorString(ret))
+		}
+
+		minor, ret := info.minorNumber(device)
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("failed to get the minor number for device with index %d: %v", i, nvml.ErrorString(ret))
+		}
+
+		path := fmt.Sprintf("nvidia%d", minor)
+		glog.V(3).Infof("Found Nvidia GPU %q\n", path)
+		topologyInfo, err := info.topology(device, i)
+		if err != nil {
+			return err
+		}
+		ngm.SetDeviceHealth(path, pluginapi.Healthy, topologyInfo)
+	}
+	fmt.Println(ngm.devices)
+	return nil
 }
 
 // numaNode retrieves the NUMA node information for a given GPU device.

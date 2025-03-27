@@ -199,7 +199,7 @@ func (d *DeviceManager) Start(partitionSize string) error {
 					Permissions:   "mrw",
 				},
 			}
-			d.gpuPartitions[gpuInstanceID] = pluginapi.Device{ID: gpuInstanceID, Health: pluginapi.Healthy}
+			d.gpuPartitions[gpuInstanceID] = pluginapi.Device{ID: gpuInstanceID, Health: pluginapi.Healthy, Topology: nil}
 		}
 
 		if numPartitions != maxPartitionCount {
