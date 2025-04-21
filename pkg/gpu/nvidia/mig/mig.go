@@ -22,6 +22,9 @@ import (
 	"regexp"
 	"strconv"
 
+	"github.com/GoogleCloudPlatform/container-engine-accelerators/pkg/gpu/nvidia/util"
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
+
 	"github.com/golang/glog"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
@@ -30,41 +33,44 @@ const nvidiaDeviceRE = `^nvidia[0-9]*$`
 
 // Max number of GPU partitions that can be created for each partition size.
 // Source: https://docs.nvidia.com/datacenter/tesla/mig-user-guide/#partitioning
-var gpuPartitionSizeMaxCount = map[string]int{
-	//nvidia-tesla-a100
-	"1g.5gb":  7,
-	"2g.10gb": 3,
-	"3g.20gb": 2,
-	"7g.40gb": 1,
-	//nvidia-a100-80gb, nvidia-h100-80gb
-	"1g.10gb": 7,
-	"2g.20gb": 3,
-	"3g.40gb": 2,
-	"7g.80gb": 1,
-	//nvidia-h100-80gb
-	"1g.20gb": 4,
-	//nvidia-h200-141gb
-	"1g.18gb":  7,
-	"1g.35gb":  4,
-	"2g.35gb":  3,
-	"3g.71gb":  2,
-	"4g.71gb":  1,
-	"7g.141gb": 1,
-	//nvidia-b200, nvidia-gb200
-	"1g.23gb": 7,
-	//nvidia-b200
-	"1g.45gb":  4,
-	"2g.45gb":  3,
-	"3g.90gb":  2,
-	"4g.90gb":  1,
-	"7g.180gb": 1,
-	//nvidia-gb200
-	"1g.47gb":  4,
-	"2g.47gb":  3,
-	"3g.93gb":  2,
-	"4g.93gb":  1,
-	"7g.186gb": 1,
-}
+var (
+	gpuPartitionSizeMaxCount = map[string]int{
+		//nvidia-tesla-a100
+		"1g.5gb":  7,
+		"2g.10gb": 3,
+		"3g.20gb": 2,
+		"7g.40gb": 1,
+		//nvidia-a100-80gb, nvidia-h100-80gb
+		"1g.10gb": 7,
+		"2g.20gb": 3,
+		"3g.40gb": 2,
+		"7g.80gb": 1,
+		//nvidia-h100-80gb
+		"1g.20gb": 4,
+		//nvidia-h200-141gb
+		"1g.18gb":  7,
+		"1g.35gb":  4,
+		"2g.35gb":  3,
+		"3g.71gb":  2,
+		"4g.71gb":  1,
+		"7g.141gb": 1,
+		//nvidia-b200, nvidia-gb200
+		"1g.23gb": 7,
+		//nvidia-b200
+		"1g.45gb":  4,
+		"2g.45gb":  3,
+		"3g.90gb":  2,
+		"4g.90gb":  1,
+		"7g.180gb": 1,
+		//nvidia-gb200
+		"1g.47gb":  4,
+		"2g.47gb":  3,
+		"3g.93gb":  2,
+		"4g.93gb":  1,
+		"7g.186gb": 1,
+	}
+	pciDevicesRoot = "/sys/bus/pci/devices"
+)
 
 // DeviceManager performs various management operations on mig devices.
 type DeviceManager struct {
@@ -213,7 +219,9 @@ func (d *DeviceManager) Start(partitionSize string) error {
 					Permissions:   "mrw",
 				},
 			}
-			d.gpuPartitions[gpuInstanceID] = pluginapi.Device{ID: gpuInstanceID, Health: pluginapi.Healthy}
+			topologyInfo, err := d.topology(gpuID)
+			glog.Infof("printing error: %v", err)
+			d.gpuPartitions[gpuInstanceID] = pluginapi.Device{ID: gpuInstanceID, Health: pluginapi.Healthy, Topology: topologyInfo}
 		}
 
 		if numPartitions != maxPartitionCount {
@@ -232,9 +240,42 @@ func (d *DeviceManager) Start(partitionSize string) error {
 	return nil
 }
 
+func (d *DeviceManager) topology(gpuID string) (*pluginapi.TopologyInfo, error) {
+	deviceIndex, err := strconv.Atoi(gpuID)
+	if err != nil {
+		return nil, err
+	}
+
+	device, ret := nvml.DeviceGetHandleByIndex(deviceIndex)
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("failed to get the device handle for index %d: %v", deviceIndex, nvml.ErrorString(ret))
+	}
+
+	pciInfo, ret := device.GetPciInfo()
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("error getting PCI Bus Info of device: %v", ret)
+	}
+	numaEnabled, node, err := util.NUMANode(pciInfo, pciDevicesRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	if !numaEnabled {
+		return nil, nil
+	}
+
+	return &pluginapi.TopologyInfo{
+		Nodes: []*pluginapi.NUMANode{
+			{
+				ID: int64(node),
+			},
+		},
+	}, nil
+}
+
 // SetDeviceHealth sets the health status for a GPU partition
-func (d *DeviceManager) SetDeviceHealth(name string, health string) {
-	d.gpuPartitions[name] = pluginapi.Device{ID: name, Health: health}
+func (d *DeviceManager) SetDeviceHealth(name string, health string, topology *pluginapi.TopologyInfo) {
+	d.gpuPartitions[name] = pluginapi.Device{ID: name, Health: health, Topology: topology}
 }
 
 // Discovers all NVIDIA GPU devices available on the local node by walking nvidiaGPUManager's devDirectory.

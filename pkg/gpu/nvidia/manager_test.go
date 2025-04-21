@@ -296,7 +296,7 @@ func Test_topology(t *testing.T) {
 					t.Errorf("unable to write following content to %q file: %q", fileName, tc.numaFileContent)
 				}
 			}
-			gotTopologyInfo, gotError := topology(device, 0)
+			gotTopologyInfo, gotError := topology(device)
 			if gotError != nil && !tc.wantError {
 				t.Errorf("%v", gotError)
 			}

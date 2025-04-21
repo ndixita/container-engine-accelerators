@@ -63,8 +63,8 @@ const (
 )
 
 var (
-	resourceName   = "nvidia.com/gpu"
 	pciDevicesRoot = "/sys/bus/pci/devices"
+	resourceName   = "nvidia.com/gpu"
 )
 
 // GPUConfig stores the settings used to configure the GPUs on a node.
@@ -290,36 +290,38 @@ func (gpuDeviceInfo *deviceInfo) pciInfo(d nvml.Device) (nvml.PciInfo, nvml.Retu
 //	        },
 //	    },
 //	}
-func topology(d nvml.Device, i int) (*pluginapi.TopologyInfo, error) {
+func topology(d nvml.Device) (*pluginapi.TopologyInfo, error) {
 	if nvmlDeviceInfo == nil {
 		nvmlDeviceInfo = &deviceInfo{}
 	}
 
-	// We only care about currentMode which indicates the current MIG mode state.
-	// The pendingMode is ignored as we're only interested in the current
-	// operational state, not future configurations.
-	currentMode, _, ret := nvmlDeviceInfo.migMode(d)
-	if ret != nvml.ERROR_NOT_SUPPORTED {
-		if ret != nvml.SUCCESS {
-			return nil, fmt.Errorf("failed to get mig mode: %v", nvml.ErrorString(ret))
-		}
-	}
+	// // We only care about currentMode which indicates the current MIG mode state.
+	// // The pendingMode is ignored as we're only interested in the current
+	// // operational state, not future configurations.
+	// currentMode, _, ret := nvmlDeviceInfo.migMode(d)
+	// if ret != nvml.ERROR_NOT_SUPPORTED {
+	// 	if ret != nvml.SUCCESS {
+	// 		return nil, fmt.Errorf("failed to get mig mode: %v", nvml.ErrorString(ret))
+	// 	}
+	// }
 
-	// For GPU topology information: When MIG (Multi-Instance GPU) is enabled, retrieve
-	// the NUMA node ID from the parent GPU device. Otherwise, get the NUMA node ID
-	// directly from the GPU device itself.
-	numaDevice := d
-	// A currentMode value of 1 means MIG is currently enabled on the device,
-	// while 0 means MIG is disabled.
-	if currentMode == 1 {
-		parent, ret := nvmlDeviceInfo.migDeviceHandleByIndex(d, i)
-		if ret != nvml.SUCCESS {
-			return nil, fmt.Errorf("failed to get mig device handle: %v", nvml.ErrorString(ret))
-		}
-		numaDevice = parent
+	// // For GPU topology information: When MIG (Multi-Instance GPU) is enabled, retrieve
+	// // the NUMA node ID from the parent GPU device. Otherwise, get the NUMA node ID
+	// // directly from the GPU device itself.
+	// numaDevice := d
+	// // A currentMode value of 1 means MIG is currently enabled on the device,
+	// // while 0 means MIG is disabled.
+	// glog.Infof("Current mode is: %d", currentMode)
+	// if currentMode == 1 {
+	// 	glog.Info("parent device")
 
-	}
-	numaEnabled, node, err := numaNode(numaDevice)
+	// 	// parent, ret := d.GetDeviceHandleFromMigDeviceHandle()
+	// 	// if ret != nvml.SUCCESS {
+	// 	// 	return nil, fmt.Errorf("failed to get mig device handle: %q", nvml.ErrorString(ret))
+	// 	// }
+	// 	// numaDevice = parent
+	// }
+	numaEnabled, node, err := numaNode(d)
 	if err != nil {
 		return nil, err
 	}
@@ -346,37 +348,9 @@ func numaNode(d nvml.Device) (numaEnabled bool, numaNode int, err error) {
 	}
 	pciInfo, ret := nvmlDeviceInfo.pciInfo(d)
 	if ret != nvml.SUCCESS {
-		return false, 0, fmt.Errorf("error getting PCI Bus Info of device with index: %v", ret)
+		return false, 0, fmt.Errorf("error getting PCI Bus Info of device: %v", ret)
 	}
-
-	var bytesT []byte
-	for _, b := range pciInfo.BusId {
-		if byte(b) == '\x00' {
-			break
-		}
-		bytesT = append(bytesT, byte(b))
-	}
-
-	// Discard leading zeros.
-	busID := strings.ToLower(strings.TrimPrefix(string(bytesT), "0000"))
-
-	numaNodeFile := fmt.Sprintf("%s/%s/numa_node", pciDevicesRoot, busID)
-	glog.Infof("Reading NUMA node information from %q", numaNodeFile)
-	b, err := os.ReadFile(numaNodeFile)
-	if err != nil {
-		return false, 0, fmt.Errorf("failed to read NUMA information from %q file: %v", numaNodeFile, err)
-	}
-
-	numaNode, err = strconv.Atoi(string(bytes.TrimSpace(b)))
-	if err != nil {
-		return false, 0, fmt.Errorf("eror parsing value for NUMA node: %v", err)
-	}
-
-	if numaNode < 0 {
-		return false, 0, nil
-	}
-
-	return true, numaNode, nil
+	return util.NUMANode(pciInfo, pciDevicesRoot)
 }
 
 // Discovers all NVIDIA GPU devices available on the local node by walking nvidiaGPUManager's devDirectory.
@@ -389,25 +363,66 @@ func (ngm *nvidiaGPUManager) discoverGPUs() error {
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("failed to get devices count: %v", nvml.ErrorString(ret))
 	}
+	// glog.Info("Devices count: %d", devicesCount)
+	// device0, _ := nvmlDeviceInfo.deviceHandleByIndex(0)
+	// dev0Count, _ := device0.GetMaxMigDeviceCount()
+	// glog.Errorf("Total ret %d", dev0Count)
+
+	// device1, _ := nvmlDeviceInfo.deviceHandleByIndex(1)
+	// dev1Count, _ := device1.GetMaxMigDeviceCount()
+	// glog.Errorf("Total ret %d", dev1Count)
 
 	for i := 0; i < devicesCount; i++ {
 		device, ret := nvmlDeviceInfo.deviceHandleByIndex((i))
 		if ret != nvml.SUCCESS {
 			return fmt.Errorf("failed to get the device handle for index %d: %v", i, nvml.ErrorString(ret))
 		}
-
 		minor, ret := nvmlDeviceInfo.minorNumber(device)
 		if ret != nvml.SUCCESS {
 			return fmt.Errorf("failed to get the minor number for device with index %d: %v", i, nvml.ErrorString(ret))
 		}
 
 		path := fmt.Sprintf("nvidia%d", minor)
-		glog.V(3).Infof("Found Nvidia GPU %q\n", path)
-		topologyInfo, err := topology(device, i)
-		if err != nil {
-			glog.Errorln(err)
+
+		currentMode, _, ret := nvmlDeviceInfo.migMode(device)
+		if ret != nvml.ERROR_NOT_SUPPORTED {
+			if ret != nvml.SUCCESS {
+				return fmt.Errorf("failed to get mig mode: %v", nvml.ErrorString(ret))
+			}
 		}
-		ngm.SetDeviceHealth(path, pluginapi.Healthy, topologyInfo)
+		if currentMode == 1 {
+			migDevicesCount, ret := device.GetMaxMigDeviceCount()
+			if ret != nvml.SUCCESS {
+				return fmt.Errorf("failed to get mig devices count: %v", nvml.ErrorString(ret))
+			}
+			for j := 0; j < migDevicesCount; j++ {
+				topologyInfo, err := topology(device)
+				if err != nil {
+					//TODO add j
+					glog.Errorln(err)
+				}
+				migDevice, ret := nvmlDeviceInfo.migDeviceHandleByIndex(device, j)
+				if ret != nvml.SUCCESS {
+					return fmt.Errorf("failed to get mig device handle: %v", nvml.ErrorString(ret))
+				}
+
+				gpuInstanceId, ret := migDevice.GetGpuInstanceId()
+				if ret != nvml.SUCCESS {
+					return fmt.Errorf("failed to get GPU instance id: %v", nvml.ErrorString(ret))
+				}
+				migDevicePath := fmt.Sprintf("%s/gi%d", path, gpuInstanceId)
+				glog.Infof("Found Nvidia MIG GPU %q\n", migDevicePath)
+				ngm.SetDeviceHealth(migDevicePath, pluginapi.Healthy, topologyInfo)
+			}
+		} else {
+			glog.Infof("Found Nvidia GPU %q\n", path)
+			topologyInfo, err := topology(device)
+			if err != nil {
+				glog.Errorln(err)
+			}
+			ngm.SetDeviceHealth(path, pluginapi.Healthy, topologyInfo)
+		}
+
 	}
 	return nil
 }
@@ -499,7 +514,7 @@ func (ngm *nvidiaGPUManager) SetDeviceHealth(name string, health string, topolog
 	if reg.MatchString(name) {
 		ngm.devices[name] = pluginapi.Device{ID: name, Health: health, Topology: topology}
 	} else {
-		ngm.migDeviceManager.SetDeviceHealth(name, health)
+		ngm.migDeviceManager.SetDeviceHealth(name, health, topology)
 	}
 }
 
@@ -533,6 +548,7 @@ func (ngm *nvidiaGPUManager) Start() error {
 	if err := ngm.discoverGPUs(); err != nil {
 		return err
 	}
+	glog.Info("Discovering GPUS....")
 	if ngm.gpuConfig.GPUPartitionSize != "" {
 		if err := ngm.migDeviceManager.Start(ngm.gpuConfig.GPUPartitionSize); err != nil {
 			return fmt.Errorf("failed to start mig device manager: %v", err)

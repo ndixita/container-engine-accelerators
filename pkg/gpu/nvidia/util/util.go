@@ -15,9 +15,14 @@
 package util
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 	"regexp"
+	"strconv"
+	"strings"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -45,4 +50,35 @@ func Files(files ...string) (*fsnotify.Watcher, error) {
 		}
 	}
 	return watcher, nil
+}
+
+func NUMANode(pciInfo nvml.PciInfo, pciDevicesRoot string) (numaEnabled bool, numaNode int, err error) {
+	var bytesT []byte
+	for _, b := range pciInfo.BusId {
+		if byte(b) == '\x00' {
+			break
+		}
+		bytesT = append(bytesT, byte(b))
+	}
+
+	// Discard leading zeros.
+	busID := strings.ToLower(strings.TrimPrefix(string(bytesT), "0000"))
+
+	numaNodeFile := fmt.Sprintf("%s/%s/numa_node", pciDevicesRoot, busID)
+	// glog.Infof("Reading NUMA node information from %q", numaNodeFile)
+	b, err := os.ReadFile(numaNodeFile)
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to read NUMA information from %v busID %q file: %v", pciInfo.BusId, numaNodeFile, err)
+	}
+
+	numaNode, err = strconv.Atoi(string(bytes.TrimSpace(b)))
+	if err != nil {
+		return false, 0, fmt.Errorf("eror parsing value for NUMA node: %v", err)
+	}
+
+	if numaNode < 0 {
+		return false, 0, nil
+	}
+
+	return true, numaNode, nil
 }
