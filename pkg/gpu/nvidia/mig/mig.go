@@ -87,6 +87,8 @@ func NewDeviceManager(devDirectory, procDirectory string) DeviceManager {
 // ListGPUPartitionDevices lists all the GPU partitions as devices that can be advertised as
 // resources available on the node.
 func (d *DeviceManager) ListGPUPartitionDevices() map[string]pluginapi.Device {
+	glog.Info("gpu partitions")
+	glog.Info(d.gpuPartitions)
 	return d.gpuPartitions
 }
 
@@ -146,6 +148,8 @@ func (d *DeviceManager) Start(partitionSize string) error {
 			if !giFileRegexp.MatchString(giFile.Name()) {
 				continue
 			}
+
+			glog.Infof("Base path: %s, file name: %s", giBasePath, giFile.Name())
 
 			numPartitions++
 
@@ -213,7 +217,8 @@ func (d *DeviceManager) Start(partitionSize string) error {
 					Permissions:   "mrw",
 				},
 			}
-			d.gpuPartitions[gpuInstanceID] = pluginapi.Device{ID: gpuInstanceID, Health: pluginapi.Healthy}
+			// get topology by gpu id and gi instance id
+			d.gpuPartitions[gpuInstanceID] = pluginapi.Device{ID: gpuInstanceID, Health: pluginapi.Healthy, Topology: &pluginapi.TopologyInfo{}}
 		}
 
 		if numPartitions != maxPartitionCount {
@@ -233,8 +238,10 @@ func (d *DeviceManager) Start(partitionSize string) error {
 }
 
 // SetDeviceHealth sets the health status for a GPU partition
-func (d *DeviceManager) SetDeviceHealth(name string, health string) {
-	d.gpuPartitions[name] = pluginapi.Device{ID: name, Health: health}
+func (d *DeviceManager) SetDeviceHealth(name string, health string, topology *pluginapi.TopologyInfo) {
+	glog.Info("here here topo info")
+	glog.Info(topology)
+	d.gpuPartitions[name] = pluginapi.Device{ID: name, Health: health, Topology: topology}
 }
 
 // Discovers all NVIDIA GPU devices available on the local node by walking nvidiaGPUManager's devDirectory.

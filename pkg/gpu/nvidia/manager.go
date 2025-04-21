@@ -170,9 +170,13 @@ func NewNvidiaGPUManager(devDirectory, procDirectory string, mountPaths []plugin
 
 // ListPhysicalDevices lists all physical GPU devices (including partitions) available on this node.
 func (ngm *nvidiaGPUManager) ListPhysicalDevices() map[string]pluginapi.Device {
+	glog.Info("Yippie...")
 	if ngm.gpuConfig.GPUPartitionSize == "" {
+		glog.Info("partition size 0")
 		return ngm.devices
 	}
+	glog.Info("partition size non-0")
+
 	return ngm.migDeviceManager.ListGPUPartitionDevices()
 }
 
@@ -182,6 +186,7 @@ func (ngm *nvidiaGPUManager) ListHealthCriticalXid() []int {
 
 // ListDevices lists all GPU devices available on this node.
 func (ngm *nvidiaGPUManager) ListDevices() map[string]pluginapi.Device {
+	glog.Info("Holllla")
 	physicalGPUDevices := ngm.ListPhysicalDevices()
 
 	switch {
@@ -311,12 +316,13 @@ func topology(d nvml.Device, i int) (*pluginapi.TopologyInfo, error) {
 	numaDevice := d
 	// A currentMode value of 1 means MIG is currently enabled on the device,
 	// while 0 means MIG is disabled.
+	glog.Errorf("Mig mode: %d", currentMode)
 	if currentMode == 1 {
-		parent, ret := nvmlDeviceInfo.migDeviceHandleByIndex(d, i)
+		_, ret := nvmlDeviceInfo.migDeviceHandleByIndex(d, i)
 		if ret != nvml.SUCCESS {
 			return nil, fmt.Errorf("failed to get mig device handle: %v", nvml.ErrorString(ret))
 		}
-		numaDevice = parent
+		// numaDevice = parent
 
 	}
 	numaEnabled, node, err := numaNode(numaDevice)
@@ -390,23 +396,43 @@ func (ngm *nvidiaGPUManager) discoverGPUs() error {
 		return fmt.Errorf("failed to get devices count: %v", nvml.ErrorString(ret))
 	}
 
+	// if mig mode enabled, then get device count using the mig method -> get migdevicehandlebyindex
+
+	glog.Errorf("Total Device count: %d", devicesCount)
+	deviceO, ret := nvmlDeviceInfo.deviceHandleByIndex(0)
+	glog.Errorf("Total ret %d", ret)
+
+	devicesCount, ret = deviceO.GetMaxMigDeviceCount()
+	glog.Errorf("Total Mig device count: %d, %d", devicesCount, ret)
+
 	for i := 0; i < devicesCount; i++ {
-		device, ret := nvmlDeviceInfo.deviceHandleByIndex((i))
+		glog.Errorf("Device count: %d, %d", i, devicesCount)
+		device, ret := nvmlDeviceInfo.migDeviceHandleByIndex(deviceO, i)
 		if ret != nvml.SUCCESS {
 			return fmt.Errorf("failed to get the device handle for index %d: %v", i, nvml.ErrorString(ret))
 		}
+		temp, ret := device.GetGpuInstanceId()
+		glog.Infof("Printing device info id: %d", temp)
 
-		minor, ret := nvmlDeviceInfo.minorNumber(device)
+		minor, ret := nvmlDeviceInfo.minorNumber(deviceO)
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("failed to get the minor number for device with index %d: %v", i, nvml.ErrorString(ret))
+			return fmt.Errorf("failed to get the minor number for device with index ooo %d: %v", i, nvml.ErrorString(ret))
 		}
 
+		currentMode, _, _ := nvmlDeviceInfo.migMode(deviceO)
+
 		path := fmt.Sprintf("nvidia%d", minor)
+		if currentMode == 1 {
+			path = fmt.Sprintf("%s/gi%d", path, temp)
+		}
+
 		glog.V(3).Infof("Found Nvidia GPU %q\n", path)
-		topologyInfo, err := topology(device, i)
+		topologyInfo, err := topology(deviceO, i)
 		if err != nil {
 			glog.Errorln(err)
 		}
+		// _, _, ret := nvmlDeviceInfo.migMode(deviceO)
+
 		ngm.SetDeviceHealth(path, pluginapi.Healthy, topologyInfo)
 	}
 	return nil
@@ -494,12 +520,14 @@ func (ngm *nvidiaGPUManager) Envs(numDevicesRequested int) map[string]string {
 func (ngm *nvidiaGPUManager) SetDeviceHealth(name string, health string, topology *pluginapi.TopologyInfo) {
 	ngm.devicesMutex.Lock()
 	defer ngm.devicesMutex.Unlock()
-
+	glog.Infof("Topology Info: %v", topology)
 	reg := regexp.MustCompile(nvidiaDeviceRE)
 	if reg.MatchString(name) {
+		glog.Info("here")
 		ngm.devices[name] = pluginapi.Device{ID: name, Health: health, Topology: topology}
 	} else {
-		ngm.migDeviceManager.SetDeviceHealth(name, health)
+		glog.Info("mighere")
+		ngm.migDeviceManager.SetDeviceHealth(name, health, topology)
 	}
 }
 

@@ -65,7 +65,7 @@ func (hc *GPUHealthChecker) Start() error {
 	glog.Info("Starting GPU Health Checker")
 
 	for name, device := range hc.devices {
-		glog.Infof("Healthchecker receives device %s, device %v+", name, device)
+		glog.Infof("Healthchecker receives device %s, device %v+, topology %v", name, device, device.Topology)
 	}
 
 	// Building mapping between device ID and their nvml represetation
